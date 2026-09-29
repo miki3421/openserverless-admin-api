@@ -165,7 +165,11 @@ class BuildService:
             if requirements is not None:
                 dockerfile_content += f"COPY {requirements} /tmp/{requirements}\n"                
                 dockerfile_content += "USER root\n"
-                dockerfile_content += "RUN /bin/extend\n"
+                if self.build_config.get("kind") == "python":
+                    # Standard Python runtimes provide pip, but not /bin/extend.
+                    dockerfile_content += "RUN python -m pip install -r /tmp/requirements.txt\n"
+                else:
+                    dockerfile_content += "RUN /bin/extend\n"
                 dockerfile_content += "USER nobody\n"
             
 
