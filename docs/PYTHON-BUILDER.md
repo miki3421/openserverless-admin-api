@@ -10,7 +10,7 @@ WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 License for the specific language governing permissions and limitations
 under the License. -->
 
-# Python builds for the Bracchi task fork
+# Python builds for the custom task fork
 
 This branch keeps the existing `/system/api/v1/build/start` request and response
 contract. Python builds now execute `python -m pip install -r
@@ -19,7 +19,7 @@ application's dependency image. Other language builders keep `/bin/extend`.
 The Dockerfile now includes the default BuildKit configuration so that the API
 can create its configuration ConfigMap when it is absent.
 
-The companion tasks are in `miki3421/openserverless-task-bracchi`, branch
+The companion tasks are in `miki3421/openserverless-task-custom`, branch
 `codex/ide-build`. They wait for the exact Job and verify the registry manifest
 before deploying an action. Builds still use native cluster architecture, the
 internal registry, and namespace-owned repository names.
