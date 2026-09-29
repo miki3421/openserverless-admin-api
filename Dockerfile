@@ -35,6 +35,7 @@ WORKDIR /home/openserverless
 # Copy source code con permessi corretti
 ADD --chown=openserverless:openserverless openserverless /home/openserverless/openserverless/
 ADD --chown=openserverless:openserverless run.sh pyproject.toml uv.lock /home/openserverless/
+COPY --chown=openserverless:openserverless deploy/buildkit/ /home/openserverless/deploy/buildkit/
 
 # Install uv (Python dependency manager)
 RUN pip install --no-cache-dir uv
