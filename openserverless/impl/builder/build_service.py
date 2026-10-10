@@ -25,6 +25,7 @@ from types import SimpleNamespace
 import random
 import string
 import binascii
+import re
 
 JOB_NAME = "build"
 CM_NAME = "cm"
@@ -35,6 +36,19 @@ class BuildService:
     It handles the creation of Dockerfiles, ConfigMaps, and Kubernetes Jobs to build Docker images
     based on the provided build configuration.
     """
+
+    @staticmethod
+    def valid_image_target(target, expected_user=None):
+        """Accept one OPS image name and a Docker-compatible tag."""
+        if not isinstance(target, str):
+            return False
+        match = re.fullmatch(r"([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?):([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})", target)
+        return bool(match and (expected_user is None or match.group(1) == expected_user))
+
+    @staticmethod
+    def valid_source_image(source):
+        """Keep FROM limited to a single image reference, never Dockerfile text."""
+        return isinstance(source, str) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*", source))
 
     def __init__(self, user_env=None):
         # A super userful Kube Api Client
@@ -205,6 +219,11 @@ class BuildService:
         """
         import tempfile
         import base64
+
+        if not self.valid_image_target(image_name):
+            return (False, "Invalid target for the build")
+        if not self.valid_source_image(self.build_config.get("source")):
+            return (False, "Invalid source image for the build")
 
         # define registry host
         self.registry_host = self.get_registry_host()
@@ -402,6 +421,8 @@ class BuildService:
 
     def create_build_job(self, image_name: str) -> dict:
         """Create a Kubernetes job manifest for building the Docker image."""
+        if not self.valid_image_target(image_name):
+            raise ValueError("Invalid target for the build")
         if not self.custom_registry_auth:
             registry_image_name = f"{self.registry_host}/{image_name}"
         else:
@@ -464,17 +485,18 @@ class BuildService:
                                 "command": ["sh", "-c"],
                                 "args": [
                                     "rootlesskit buildkitd --config /config/buildkitd.toml  & sleep 3 && "
-                                    f"buildctl build --progress=plain --frontend=dockerfile.v0 --local context=/workspace --local dockerfile=/workspace --output=type=image,name={registry_image_name},push=true"
+                                    'buildctl build --progress=plain --frontend=dockerfile.v0 --local context=/workspace --local dockerfile=/workspace --output="type=image,name=${REGISTRY_IMAGE_NAME},push=true"'
                                 ],                                
                                 "securityContext": {
                                     "runAsUser": 1000,
                                     "runAsGroup": 1000,
                                     "allowPrivilegeEscalation": True,
-                                    "privileged": True,
+                                    "privileged": False,
                                     "seccompProfile": { "type": "Unconfined" }
                                 },
                                 "env": [
-                                    { "name": "BUILDKIT_ROOTLESS", "value": "1" }
+                                    { "name": "BUILDKIT_ROOTLESS", "value": "1" },
+                                    { "name": "REGISTRY_IMAGE_NAME", "value": registry_image_name }
                                 ],
                                 "volumeMounts": [
                                     { "name": "openserverless-buildkitd-conf", "mountPath": "/config" },
