@@ -179,7 +179,24 @@ class BuildService:
             if requirements is not None:
                 dockerfile_content += f"COPY {requirements} /tmp/{requirements}\n"                
                 dockerfile_content += "USER root\n"
-                dockerfile_content += "RUN /bin/extend\n"
+                if self.build_config.get("kind") == "python":
+                    # Preserve extension-aware runtimes, while also supporting
+                    # the standard OPS Python images that provide Python/pip.
+                    dockerfile_content += (
+                        "RUN if [ -x /bin/extend ]; then /bin/extend; "
+                        "else python -m pip install --no-cache-dir -r /tmp/requirements.txt; fi\n"
+                    )
+                elif self.build_config.get("kind") == "nodejs":
+                    dockerfile_content += (
+                        "RUN if [ -x /bin/extend ]; then /bin/extend; "
+                        "else [ ! -e /app/node_modules ] && [ ! -L /app/node_modules ] && "
+                        "mkdir -p /opt/ops-deps && "
+                        "cp /tmp/package.json /opt/ops-deps/package.json && "
+                        "npm install --prefix /opt/ops-deps --omit=dev --no-audit --no-fund && "
+                        "ln -s /opt/ops-deps/node_modules /app/node_modules; fi\n"
+                    )
+                else:
+                    dockerfile_content += "RUN /bin/extend\n"
                 dockerfile_content += "USER nobody\n"
             
 
@@ -428,6 +445,9 @@ class BuildService:
         else:
             registry_image_name = f"{image_name}"
 
+        # Require a private Kubernetes user namespace; keep BuildKit's process
+        # sandbox enabled. Subordinate IDs exclude Pod root and the worker UID.
+        # The resulting nested map supports build IDs 0..65534.
         # --- MANIFEST DEL JOB ---
         job_manifest = {
             "apiVersion": "batch/v1",
@@ -438,6 +458,8 @@ class BuildService:
                 "template": {
                     "spec": {
                         "restartPolicy": "Never",
+                        "automountServiceAccountToken": False,
+                        "hostUsers": False,
                         "volumes": [
                             {
                                 "name": "openserverless-buildkitd-conf",
@@ -470,7 +492,7 @@ class BuildService:
                                 "name": "copy-build-context",
                                 "image": "busybox:1.36",
                                 "command": [
-                                    "sh", "-c", "cp -rvL /configmap/* /workspace/ && cat /workspace/Dockerfile",
+                                    "sh", "-c", "cp -rL /configmap/* /workspace/ && printf 'user:1:999\\nuser:1001:64535\\n' > /workspace/subuid && cp /workspace/subuid /workspace/subgid",
                                 ],
                                 "volumeMounts": [
                                     { "name": "build-context-vol", "mountPath": "/configmap", },
@@ -481,7 +503,7 @@ class BuildService:
                         "containers": [
                             {
                                 "name": "buildkit",
-                                "image": "moby/buildkit:master-rootless",
+                                "image": "moby/buildkit@sha256:e6102bb86f8a2c79c8ae8aa0de3d5edef500dd33b619414413e06138e13fb1a1",
                                 "command": ["sh", "-c"],
                                 "args": [
                                     "rootlesskit buildkitd --config /config/buildkitd.toml  & sleep 3 && "
@@ -492,7 +514,9 @@ class BuildService:
                                     "runAsGroup": 1000,
                                     "allowPrivilegeEscalation": True,
                                     "privileged": False,
-                                    "seccompProfile": { "type": "Unconfined" }
+                                    "procMount": "Unmasked",
+                                    "seccompProfile": { "type": "Unconfined" },
+                                    "appArmorProfile": { "type": "Unconfined" },
                                 },
                                 "env": [
                                     { "name": "BUILDKIT_ROOTLESS", "value": "1" },
@@ -501,6 +525,8 @@ class BuildService:
                                 "volumeMounts": [
                                     { "name": "openserverless-buildkitd-conf", "mountPath": "/config" },
                                     { "name": "workspace", "mountPath": "/workspace" },
+                                    { "name": "workspace", "mountPath": "/etc/subuid", "subPath": "subuid", "readOnly": True },
+                                    { "name": "workspace", "mountPath": "/etc/subgid", "subPath": "subgid", "readOnly": True },
                                     { "name": "docker-config", "mountPath": "/home/user/.docker" },
                                     { "name": "img-cache", "mountPath": "/tmp" },
                                     { "name": "cdi-etc", "mountPath": "/etc/cdi" },
