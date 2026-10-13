@@ -16,6 +16,7 @@
 # under the License.
 #
 import os
+import re
 from openserverless import app
 from http import HTTPStatus
 from flask import request, Response
@@ -252,3 +253,25 @@ def clean():
         return res_builder.build_error_message("Failed to clean up old build jobs.", status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
     
     return res_builder.build_response_message(f"Cleaned up {clean_result} jobs successfully.", status_code=HTTPStatus.OK)
+
+
+@app.route('/system/api/v1/build/status/<job_name>', methods=['GET'])
+def build_status(job_name):
+    auth_result = authorize()
+    if isinstance(auth_result, Response):
+        return auth_result
+    if not re.fullmatch(r"build-[a-z0-9][a-z0-9.-]{0,245}", job_name):
+        return res_builder.build_error_message("Build not found", 404)
+    user = auth_result.get('login', '').lower()
+    if not user:
+        return res_builder.build_error_message("Invalid authorization", 401)
+    try:
+        from openserverless.common.kube_api_client import KubeApiClient
+        result = BuildService.describe_job(KubeApiClient().get_build_job(job_name), user)
+    except Exception:
+        return res_builder.build_error_message("Build status temporarily unavailable", 503)
+    if result is None:
+        return res_builder.build_error_message("Build not found", 404)
+    response = res_builder.build_response_with_data(result)
+    response.headers["Cache-Control"] = "no-store"
+    return response

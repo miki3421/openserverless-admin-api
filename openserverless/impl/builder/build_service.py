@@ -16,6 +16,7 @@
 # under the License.
 #
 import shutil
+import hashlib
 from openserverless.common.kube_api_client import KubeApiClient
 import os
 import uuid
@@ -49,6 +50,26 @@ class BuildService:
     def valid_source_image(source):
         """Keep FROM limited to a single image reference, never Dockerfile text."""
         return isinstance(source, str) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*", source))
+
+    @staticmethod
+    def owner_label(user):
+        return hashlib.sha256(user.encode()).hexdigest()[:63]
+
+    @classmethod
+    def describe_job(cls, job, user):
+        """Return only tenant-owned, non-secret build status, never raw logs."""
+        if not job or job.get("metadata", {}).get("labels", {}).get("ops.openserverless.org/build-owner") != cls.owner_label(user):
+            return None
+        status = job.get("status", {})
+        conditions = {c.get("type") for c in status.get("conditions", []) if c.get("status") == "True"}
+        if conditions & {"Failed", "FailureTarget"} or status.get("failed", 0):
+            state = "failed"
+        elif "Complete" in conditions or status.get("succeeded", 0):
+            state = "succeeded"
+        else:
+            state = "running" if status.get("active", 0) else "pending"
+        return {"job_name": job["metadata"]["name"], "state": state,
+                "image": job["metadata"].get("annotations", {}).get("ops.openserverless.org/build-image", "")}
 
     def __init__(self, user_env=None):
         # A super userful Kube Api Client
@@ -452,9 +473,12 @@ class BuildService:
         job_manifest = {
             "apiVersion": "batch/v1",
             "kind": "Job",
-            "metadata": {"name": self.job_name},
+            "metadata": {"name": self.job_name,
+                         "labels": {"ops.openserverless.org/build-owner": self.owner_label(self.user)},
+                         "annotations": {"ops.openserverless.org/build-image": registry_image_name}},
             "spec": {
                 "backoffLimit": 0,
+                "activeDeadlineSeconds": 900,
                 "template": {
                     "spec": {
                         "restartPolicy": "Never",

@@ -25,6 +25,19 @@ from openserverless.impl.builder.build_service import BuildService
 
 
 class BuildTargetSecurityTest(unittest.TestCase):
+    def test_build_status_is_owner_scoped_and_minimal(self):
+        job = {"metadata": {"name": "build-alpha-test", "labels": {
+            "ops.openserverless.org/build-owner": BuildService.owner_label("alpha")},
+            "annotations": {"ops.openserverless.org/build-image": "registry/alpha:test"}},
+            "spec": {"secret": "must-not-be-returned"}, "status": {}}
+        self.assertIsNone(BuildService.describe_job(job, "beta"))
+        self.assertIsNone(BuildService.describe_job(None, "alpha"))
+        for status, state in [({}, "pending"), ({"active": 1}, "running"),
+                              ({"succeeded": 1}, "succeeded"), ({"failed": 1}, "failed")]:
+            job["status"] = status
+            self.assertEqual({"job_name": "build-alpha-test", "state": state,
+                              "image": "registry/alpha:test"}, BuildService.describe_job(job, "alpha"))
+
     def test_rejects_shell_syntax_before_kubernetes_calls(self):
         service = BuildService.__new__(BuildService)
         service.user = "alpha"

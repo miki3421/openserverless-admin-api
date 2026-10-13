@@ -452,6 +452,17 @@ class KubeApiClient:
             logging.error(f"delete_secret {ex}")
             return False
         
+    def get_build_job(self, name, namespace="openserverless"):
+        """Read one validated build name without logging its manifest or secrets."""
+        response = req.get(
+            f"{self.host}/apis/batch/v1/namespaces/{namespace}/jobs/{name}",
+            headers={"Authorization": self.token}, verify=self.ssl_ca_cert, timeout=15,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
     def get_jobs(self, name_filter: str | None = None, namespace="openserverless"):
         """
         Get all Kubernetes jobs in a specific namespace.
