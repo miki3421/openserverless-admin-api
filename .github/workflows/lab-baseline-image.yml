@@ -1,0 +1,36 @@
+name: Publish patched 0.9.0 laboratory image
+on:
+  push:
+    branches: [lab-baseline-090-20261019]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: github.repository == 'miki3421/openserverless-admin-api' && github.ref == 'refs/heads/lab-baseline-090-20261019'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Select source-specific image
+        run: echo "IMAGE=ghcr.io/miki3421/openserverless-admin-api:baseline-090-${GITHUB_SHA}" >> "$GITHUB_ENV"
+      - name: Build complete image
+        run: docker build --platform linux/amd64 --label org.opencontainers.image.source=https://github.com/miki3421/openserverless-admin-api --label org.opencontainers.image.revision=${GITHUB_SHA} -t "$IMAGE" .
+      - name: Run baseline regression tests
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE/tests:/home/openserverless/tests:ro" --entrypoint /home/openserverless/.venv/bin/python "$IMAGE" -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Authenticate to personal GitHub registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish laboratory image
+        run: |
+          docker push "$IMAGE"
+          docker image inspect "$IMAGE" --format '{{json .RepoDigests}}' >> "$GITHUB_STEP_SUMMARY"

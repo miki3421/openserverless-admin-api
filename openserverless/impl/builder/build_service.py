@@ -454,6 +454,9 @@ class BuildService:
                             },
                             {"name": "workspace", "emptyDir": {}},
                             {"name": "img-cache", "emptyDir": {}},
+                            # Explicit state avoids unmapped ownership of image-declared
+                            # anonymous volumes on nested Kind/containerd runtimes.
+                            {"name": "buildkit-state", "emptyDir": {}},
                             {"name": "cdi-etc", "emptyDir": {}},
                             {"name": "cdi-run", "emptyDir": {}},
                             {"name": "cdi-buildkit", "emptyDir": {}},
@@ -475,10 +478,11 @@ class BuildService:
                                 "name": "copy-build-context",
                                 "image": "busybox:1.36",
                                 "command": [
-                                    "sh", "-c", "cp -rL /configmap/* /workspace/ && printf 'user:1:999\\nuser:1001:64535\\n' > /workspace/subuid && cp /workspace/subuid /workspace/subgid",
+                                    "sh", "-c", "cp -rL /configmap/* /workspace/ && printf 'user:1:999\\nuser:1001:64535\\n' > /workspace/subuid && cp /workspace/subuid /workspace/subgid && chown 1000:1000 /buildkit-state",
                                 ],
                                 "volumeMounts": [
                                     { "name": "build-context-vol", "mountPath": "/configmap", },
+                                    { "name": "buildkit-state", "mountPath": "/buildkit-state" },
                                     { "name": "workspace", "mountPath": "/workspace" },
                                 ],
                             }
@@ -512,6 +516,7 @@ class BuildService:
                                     { "name": "workspace", "mountPath": "/etc/subgid", "subPath": "subgid", "readOnly": True },
                                     { "name": "docker-config", "mountPath": "/home/user/.docker" },
                                     { "name": "img-cache", "mountPath": "/tmp" },
+                                    { "name": "buildkit-state", "mountPath": "/home/user/.local/share/buildkit" },
                                     { "name": "cdi-etc", "mountPath": "/etc/cdi" },
                                     { "name": "cdi-run", "mountPath": "/var/run/cdi" },
                                     { "name": "cdi-buildkit", "mountPath": "/etc/buildkit/cdi" },

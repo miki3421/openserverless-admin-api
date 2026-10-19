@@ -51,6 +51,12 @@ class BuildTargetSecurityTest(unittest.TestCase):
         self.assertEqual({"/etc/subuid", "/etc/subgid"}, {
             mount["mountPath"] for mount in buildkit["volumeMounts"] if mount.get("subPath")
         })
+        # Avoid image-declared anonymous volumes whose owner is not mapped by Kind.
+        self.assertIn({"name": "buildkit-state", "emptyDir": {}}, pod["volumes"])
+        self.assertIn({"name": "buildkit-state", "mountPath": "/home/user/.local/share/buildkit"}, buildkit["volumeMounts"])
+        init = pod["initContainers"][0]
+        self.assertIn({"name": "buildkit-state", "mountPath": "/buildkit-state"}, init["volumeMounts"])
+        self.assertIn("chown 1000:1000 /buildkit-state", init["command"][2])
         self.assertFalse(buildkit["securityContext"]["privileged"])
         self.assertEqual("Unconfined", buildkit["securityContext"]["appArmorProfile"]["type"])
         self.assertEqual("Unconfined", buildkit["securityContext"]["seccompProfile"]["type"])
