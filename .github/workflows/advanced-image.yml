@@ -1,0 +1,80 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+name: Publish Advanced Admin API
+
+on:
+  push:
+    branches: [advanced]
+    paths:
+      - '.github/workflows/advanced-image.yml'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'openserverless/**'
+      - 'tests/**'
+      - 'run.sh'
+      - 'LICENSE'
+      - 'NOTICE'
+      - 'DISCLAIMER'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'miki3421/openserverless-admin-api' && github.ref == 'refs/heads/advanced'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Select immutable source tag
+        run: echo "IMAGE=ghcr.io/miki3421/openserverless-admin-api:advanced-${GITHUB_SHA}" >> "$GITHUB_ENV"
+      - name: Build linux/amd64 image
+        run: |
+          docker build --platform linux/amd64 \
+            --label "org.opencontainers.image.source=https://github.com/miki3421/openserverless-admin-api" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.licenses=Apache-2.0" \
+            -t "$IMAGE" .
+      - name: Test builder contracts in the image
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE/tests:/home/openserverless/tests:ro" \
+            --entrypoint /home/openserverless/.venv/bin/python \
+            "$IMAGE" -m unittest tests.test_build_target_security
+      - name: Authenticate with GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish image and digest evidence
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE" | tee push.log
+          docker manifest inspect "$IMAGE" > manifest.json
+          digest=$(docker image inspect "$IMAGE" --format '{{range .RepoDigests}}{{println .}}{{end}}' | sed -n 's|^ghcr.io/miki3421/openserverless-admin-api@|@|p')
+          test -n "$digest"
+          printf 'Source commit: `%s`\n\nImage: `%s%s`\n' "$GITHUB_SHA" "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
