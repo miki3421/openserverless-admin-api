@@ -27,6 +27,9 @@ class FakeCouchDB:
     def __init__(self, docs):
         self.docs = docs
 
+    def find_active_subject(self, **kwargs):
+        return {"subject": kwargs["subject"], "namespaces": [{"uuid": "uuid", "key": "key"}]}
+
     def find_doc(self, db_name, selector):
         return {"docs": self.docs}
 
@@ -36,6 +39,9 @@ class SequencedCouchDB:
     def __init__(self, docs_by_call):
         self.docs_by_call = list(docs_by_call)
         self.calls = 0
+
+    def find_active_subject(self, **kwargs):
+        return {"subject": kwargs["subject"], "namespaces": [{"uuid": "uuid", "key": "key"}]}
 
     def find_doc(self, db_name, selector):
         index = min(self.calls, len(self.docs_by_call) - 1)

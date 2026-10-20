@@ -103,11 +103,19 @@ class AuthService:
 
         return resp
 
+    def subject_is_active(self, login):
+        try:
+            return bool(self.couch_db.find_active_subject(subject=login))
+        except Exception:
+            return False
+
     def login(self, login, password):
         user_data = self.fetch_user_data(login)
 
         if user_data:
             if bu.verify_password(password, user_data["password"]):
+                if not self.subject_is_active(login):
+                    return res_builder.build_error_message("Invalid credentials", 401)
                 # if(password == user_data['password']):
                 return res_builder.build_response_with_data(self.map_data(user_data))
             else:
@@ -183,6 +191,9 @@ class AuthService:
         if "AUTH" not in login_data:
             logging.error(f"OIDC user {login} metadata is missing AUTH")
             return res_builder.build_error_message("Namespace metadata is missing AUTH", 500)
+
+        if not self.subject_is_active(login):
+            return res_builder.build_error_message("Forbidden", 403)
 
         login_data["LOGIN"] = login
         login_data["NAMESPACE"] = login
@@ -352,6 +363,8 @@ class AuthService:
 
         if user_data:
             if bu.verify_password(old_password, user_data["password"]):
+                if not self.subject_is_active(login):
+                    return res_builder.build_error_message("Invalid credentials", 401)
                 whisk_user = self.kube_client.get_whisk_user(user_data["login"])
 
                 whisk_user["spec"]["password"] = new_password

@@ -125,28 +125,9 @@ class OpenwhiskAuthorize:
         :param key the OW subject key
         :return a ubject document
         """
-        logging.info(f"searching for openwhisk subject {uuid}")
         try:
-            selector = {
-                "selector": {"namespaces": {"$elemMatch": {"uuid": uuid, "key": key}}}
-            }
-
-            response = self._db.find_doc(SUBJECT_META_DBN, json.dumps(selector))
-
-            if response["docs"]:
-                docs = list(response["docs"])
-                if len(docs) > 0:
-                    logging.debug(
-                        f"OpenServerless namespace for user {uuid} found. Returning Result."
-                    )
-                    return docs[0]
-
-            logging.warning(f"OpenServerless metadata for user {uuid} not found!")
-            return None
-        except Exception as e:
-            logging.error(
-                f"failed to query OpenServerless metadata for user {uuid}. Reason: {e}"
-            )
+            return self._db.find_active_subject(uuid=uuid, key=key)
+        except Exception:
             return None
 
     def fetch_user_data(self, username: str):
