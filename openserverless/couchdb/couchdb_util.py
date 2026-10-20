@@ -29,13 +29,47 @@ class CouchDB:
         self.db_port = environ.get("COUCHDB_SERVICE_PORT", "5984")
         self.db_host = environ.get("COUCHDB_SERVICE_HOST", "localhost")
         self.db_username = environ.get("COUCHDB_ADMIN_USER", "whisk_admin")
-        self.db_password = environ.get("COUCHDB_ADMIN_PASSWORD", "wfoygT7dvDtE")
+        self.db_password = environ.get("COUCHDB_ADMIN_PASSWORD")
+        if not isinstance(self.db_password, str) or not self.db_password.strip():
+            raise ValueError("CouchDB administrator password must be configured")
 
         self.db_auth = req.auth.HTTPBasicAuth(self.db_username, self.db_password)
         self.db_url = f"{self.db_protocol}://{self.db_host}:{self.db_port}"
         self.db_base = f"{self.db_url}/{self.db_prefix}"
         self.db_session = req.Session()
         self.db_session.auth = self.db_auth
+
+    def find_active_subject(self, *, uuid=None, key=None, subject=None):
+        """Look up a live identity, enforcing revocation on every authentication path."""
+        selector = {}
+        if subject is not None:
+            if not isinstance(subject, str) or not subject:
+                return None
+            selector['subject'] = {'$eq': subject}
+        if uuid is not None or key is not None:
+            if not all(isinstance(value, str) and value for value in (uuid, key)):
+                return None
+            selector['namespaces'] = {'$elemMatch': {'uuid': uuid, 'key': key}}
+        if not selector:
+            return None
+        response = self.find_doc('subjects', json.dumps({'selector': selector}))
+        if not isinstance(response, dict) or not isinstance(response.get('docs'), list):
+            return None
+        for doc in response['docs']:
+            if not isinstance(doc, dict) or doc.get('blocked') or not doc.get('subject'):
+                continue
+            if subject is not None and doc.get('subject') != subject:
+                continue
+            namespaces = doc.get('namespaces')
+            if not isinstance(namespaces, list) or not any(
+                    isinstance(ns, dict) and ns.get('uuid') and ns.get('key') for ns in namespaces):
+                continue
+            if uuid is not None and not any(
+                    isinstance(ns, dict) and ns.get('uuid') == uuid and ns.get('key') == key
+                    for ns in namespaces):
+                continue
+            return doc
+        return None
 
     def wait_db_ready(self, max_seconds):
         logging.info("entering CouchDB.wait_db_ready()")
