@@ -17,8 +17,6 @@
 #
 
 """Externally authorized, create-only OPS tenant provisioning."""
-import base64
-import binascii
 import re
 import secrets
 import string
@@ -26,6 +24,7 @@ import uuid
 
 from openserverless.common.validation import is_valid_username
 from .kube_client import ProvisioningError
+from .namespace_guard import NamespaceGuard
 from .routes import route_context, tenant_routes
 
 SECRET_NAME = "openserverless-user-provisioning-token"
@@ -50,19 +49,6 @@ def random_secret(length=32):
 class UserProvisioningService:
     def __init__(self, kube):
         self.kube = kube
-
-    def authorize(self, supplied):
-        secret = self.kube.provisioning_secret()
-        try:
-            if not isinstance(secret, dict) or secret.get("type") != "Opaque":
-                raise ValueError()
-            token = base64.b64decode(secret["data"]["token"], validate=True)
-            if not token.strip() or len(token) > 8192:
-                raise ValueError()
-        except (KeyError, TypeError, ValueError, binascii.Error):
-            raise ProvisioningError("User provisioning authorization is not configured", 503) from None
-        if not secrets.compare_digest(supplied, token):
-            raise ProvisioningError("Missing or invalid provisioning token", 401)
 
     def validate(self, body):
         if not isinstance(body, dict) or set(body) - {"user", "password", "email", "services"}:
@@ -128,6 +114,7 @@ class UserProvisioningService:
         streamer = self.kube.streamer_service() is not None
         # Validate hostname and route construction before creating anything.
         tenant_routes(user, context, services, streamer, "preflight")
+        NamespaceGuard().assert_unused(user)
         spec = {"namespace": user, "email": body["email"], "password": body["password"],
                 "auth": f"{uuid.uuid4()}:{random_secret(64)}"}
         for name in ("redis", "mongodb", "postgres", "milvus"):

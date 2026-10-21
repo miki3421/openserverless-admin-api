@@ -35,12 +35,28 @@ subject against the actual Admin API pod. Existing broader roles are not changed
 or narrowed by this manifest. Kubernetes RBAC cannot restrict `create` by
 `resourceNames`; ingress and middleware creation is limited to this namespace.
 
-Each API request reads the Secret again. Replacing its token revokes the old
-value for subsequent authorization checks without a restart. Removing the
-Secret disables new provisioning requests. Requests already authorized may
-complete. An empty, malformed, missing or unreadable Secret fails closed;
-it never falls back to a built-in credential. Normal startup and other APIs do
-not require the Secret.
+One background worker per Admin API process reads the Secret, then waits one
+second before refreshing it again. HTTP requests never perform this Secret
+lookup and never change its schedule. Each request compares its bearer in
+constant time against the current, short-lived in-memory snapshot. Invalid
+bearers return `401` and cannot start a shared cooldown or block valid bearers.
+There is no per-caller token cache and no new persistent credential or service.
+
+Replacing or removing the Secret takes effect without a restart. A snapshot
+expires two seconds after its Kubernetes read **started**, so rotation and
+revocation have a maximum two-second stale-credential window. A slow response
+cannot renew that window. An empty, malformed, missing or unreadable Secret
+immediately clears the snapshot when observed. Expired snapshots are never used,
+even while the next read is in progress. Requests already authorized may
+complete.
+
+The first well-formed bearer starts the worker lazily. Until its first successful
+read, or when no fresh credential is available, the endpoint returns `503` with
+`Retry-After: 1`. Clients should retry with backoff. The failed request does not
+cancel, delay or reset background refresh. Normal startup and other APIs do not
+require the Secret. With multiple replicas, each process maintains its own
+worker and freshness bound; ingress limits can enforce an overall deployment
+traffic budget.
 
 ## Request
 
@@ -120,6 +136,16 @@ User creation uses POST/create, never apply or upsert. An existing, blocked, or
 deleting WhiskUser returns `409`. Concurrent creates yield one winner and a
 conflict; no existing account's password, services, or routes are changed.
 
+The API also verifies namespace availability directly in the existing CouchDB
+databases before creating a WhiskUser. An existing subject, a deleted subject
+tombstone, or retained OpenWhisk entity/activation IDs returns `409`. This
+prevents a new credential set from inheriting a deleted tenant's actions,
+packages or history. Even a tenant whose resources were removed normally keeps
+its subject tombstone, so use a genuinely new name. The API never purges data or
+tombstones automatically. Unavailable or malformed database responses return
+`503` and create no user. This guard protects this provisioning endpoint; it
+does not change the CLI/SSO lifecycle or certify their name-reuse behavior.
+
 If route submission fails after user creation, the API returns `503` with
 `User created but route setup failed; administrator review required`. The user
 is retained because reconciliation may already be running. Do not blindly
@@ -136,7 +162,7 @@ check the WhiskUser before attempting recovery.
 | 202 | New WhiskUser created; provisioning pending |
 | 400 | Invalid payload or service selection |
 | 401 | Missing or invalid provisioning Bearer token |
-| 409 | User already exists (including a concurrent creation conflict) |
+| 409 | User exists, name is retained, or concurrent creation conflict |
 | 413 | Request exceeds 16 KiB |
 | 415 | Request content type is not JSON |
 | 503 | Feature unconfigured, dependency unavailable, or explicit partial route failure |
@@ -155,6 +181,9 @@ credential isolation, authorization, rotation/revocation, concurrent creation,
 Kubernetes failure distinctions, malformed/oversized input, redacted logs,
 partial route failures, and nginx/Traefik TLS/S3 route contracts. The legacy
 client and login/SSO helpers are exercised by their existing suites.
+It also covers deleted subject tombstones, orphaned entity/activation conflicts,
+fail-closed availability checks, valid requests during repeated invalid bearers,
+single-worker refresh, expiry during slow reads, and rotation/revocation recovery.
 
 Before publication, also verify the real Kubernetes RBAC and operator flow in
 the lab: provisioning, readiness, password login, each enabled service, routes,
@@ -216,9 +245,13 @@ Create the external authorization Secret as described above and call
 `POST https://<your-apihost>/system/api/v1/users` using that Secret's token as a
 Bearer credential. Use a new synthetic user name. If the endpoint returns 404,
 check the installed image and that the existing ingress forwards `/system` to
-the Admin API. A 503 can mean the optional Secret has not been created yet;
-its JSON message distinguishes that case from route setup failures. The target
-host must be nginx or Traefik as documented above.
+the Admin API. A `503` with `Provisioning authorization temporarily unavailable`
+can mean the first background read is still pending, the optional Secret is
+absent/invalid, or Kubernetes is unavailable. Honor `Retry-After` and use bounded
+backoff for that authorization error; investigate the Secret and its RBAC if it
+persists. A partial user/route creation error instead requires the administrator
+recovery described above. The target host must be nginx or Traefik as documented
+above.
 
 To roll back the executable, set the same container image back to the saved
 reference and wait for rollout. Removing the provisioning Secret disables new

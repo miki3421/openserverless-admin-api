@@ -25,6 +25,7 @@ from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 from openserverless import app
 from openserverless.common import response_builder
 from openserverless.error.config_exception import ConfigException
+from openserverless.impl.provisioning.admission import provisioning_authorizer
 from openserverless.impl.provisioning.kube_client import ProvisioningError, ProvisioningKubeClient
 from openserverless.impl.provisioning.user_service import UserProvisioningService, bearer_token
 
@@ -61,7 +62,7 @@ def create_user():
       202: {description: "WhiskUser created; provisioning pending, not a readiness guarantee."}
       400: {description: Invalid payload or unavailable requested service.}
       401: {description: Missing or invalid provisioning token.}
-      409: {description: User already exists; no update performed.}
+      409: {description: User exists or namespace is retained; no update performed.}
       413: {description: Request body exceeds 16 KiB.}
       415: {description: Content-Type must be application/json.}
       503: {description: "Provisioning configuration or Kubernetes dependency unavailable."}
@@ -69,8 +70,8 @@ def create_user():
     """
     try:
         token = bearer_token(request.headers.get("Authorization"))
+        provisioning_authorizer.authorize(token)
         service = UserProvisioningService(ProvisioningKubeClient())
-        service.authorize(token)
         if not request.is_json:
             raise ProvisioningError("Content-Type must be application/json", 415)
         request.max_content_length = 16384
@@ -78,7 +79,10 @@ def create_user():
         result = service.provision(body)
         return response_builder.build_response_with_data(result, 202)
     except ProvisioningError as exc:
-        return response_builder.build_error_message(str(exc), exc.status)
+        response = response_builder.build_error_message(str(exc), exc.status)
+        if exc.status == 503:
+            response.headers["Retry-After"] = "1"
+        return response
     except BadRequest:
         return response_builder.build_error_message("Invalid JSON payload", 400)
     except RequestEntityTooLarge:

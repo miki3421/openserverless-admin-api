@@ -22,12 +22,15 @@ from concurrent.futures import ThreadPoolExecutor
 import io
 import logging
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
 import requests
 from openserverless import app
 from openserverless.impl.provisioning.kube_client import ProvisioningError, ProvisioningKubeClient
+from openserverless.impl.provisioning.admission import ProvisioningAuthorizer
+from openserverless.impl.provisioning.namespace_guard import NamespaceGuard
 from openserverless.impl.provisioning.routes import route_context, tenant_routes
 from openserverless.impl.provisioning.user_service import UserProvisioningService, SERVICE_NAMES
 
@@ -76,6 +79,18 @@ class ProvisioningApiTest(unittest.TestCase):
         self.factory = patch("openserverless.rest.users.ProvisioningKubeClient", return_value=self.kube)
         self.factory.start()
         self.addCleanup(self.factory.stop)
+        # Service-contract tests refresh synchronously. Actual asynchronous
+        # refresh, expiry and invalid/valid contention have focused tests below.
+        self.authorizer = ProvisioningAuthorizer(loader=self.kube.provisioning_secret)
+        self.authorizer_patch = patch("openserverless.rest.users.provisioning_authorizer", self.authorizer)
+        self.authorizer_patch.start()
+        self.addCleanup(self.authorizer_patch.stop)
+        self.refresh_patch = patch.object(self.authorizer, "start", self.authorizer._refresh_once)
+        self.refresh_patch.start()
+        self.addCleanup(self.refresh_patch.stop)
+        self.guard_patch = patch("openserverless.impl.provisioning.user_service.NamespaceGuard", autospec=True)
+        self.guard = self.guard_patch.start().return_value
+        self.addCleanup(self.guard_patch.stop)
 
     def post(self, body=BODY, token=TOKEN, **kwargs):
         headers = {} if token is None else {"Authorization": "Bearer " + token}
@@ -172,6 +187,69 @@ class ProvisioningApiTest(unittest.TestCase):
         self.assertEqual(409, self.post({**BODY, "password": "different", "services": "redis"}).status_code)
         self.assertEqual(before, self.kube.users)
         self.assertEqual(routes, self.kube.routes)
+
+    def test_retained_namespace_conflict_and_unverifiable_state_do_not_create(self):
+        for code in (409, 503):
+            self.guard.assert_unused.side_effect = ProvisioningError("Namespace unavailable", code)
+            self.assertEqual(code, self.post().status_code)
+            self.assertEqual({}, self.kube.users)
+            self.assertEqual([], self.kube.routes)
+
+    def test_invalid_bearers_cannot_lock_out_valid_requests_or_trigger_secret_reads(self):
+        now = [0.0]
+        auth = ProvisioningAuthorizer(loader=self.kube.provisioning_secret, clock=lambda: now[0])
+        with patch("openserverless.rest.users.provisioning_authorizer", auth), patch.object(auth, "start"):
+            for cycle in range(6):
+                now[0] = float(cycle)
+                auth._refresh_once()
+                for index in range(20):
+                    self.assertEqual(401, self.post(token="invalid-" + str(index)).status_code)
+                self.assertEqual(202, self.post({**BODY, "user": "labtenant" + str(cycle)}).status_code)
+            self.assertEqual(6, self.kube.secret_reads)
+
+    def test_slow_refresh_keeps_valid_and_invalid_requests_independent(self):
+        entered, release = threading.Event(), threading.Event()
+        now = [0.0]
+        auth = ProvisioningAuthorizer(loader=self.kube.provisioning_secret, clock=lambda: now[0])
+        auth._refresh_once()
+        def slow_secret():
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test synchronization timed out")
+            return self.kube.secret
+        with patch("openserverless.rest.users.provisioning_authorizer", auth), patch.object(auth, "start"), \
+                patch.object(self.kube, "provisioning_secret", side_effect=slow_secret) as lookup:
+            auth._loader = self.kube.provisioning_secret
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                first = pool.submit(auth._refresh_once)
+                try:
+                    self.assertTrue(entered.wait(2))
+                    other = list(pool.map(lambda _: self.post(token="invalid").status_code, range(12)))
+                    self.assertEqual([401] * 12, other)
+                    self.assertEqual(202, self.post().status_code)
+                    lookup.assert_called_once()
+                    with app.test_client() as client:
+                        self.assertEqual(200, client.get("/system/apispec_1.json").status_code)
+                    now[0] = 2.0
+                    self.assertEqual(503, self.post().status_code)
+                finally:
+                    release.set()
+                first.result(timeout=2)
+
+    def test_dependency_failure_revokes_snapshot_and_refresh_recovers(self):
+        auth = ProvisioningAuthorizer(loader=self.kube.provisioning_secret)
+        auth._refresh_once()
+        with patch("openserverless.rest.users.provisioning_authorizer", auth), patch.object(auth, "start"):
+            with patch.object(auth, "_loader", side_effect=RuntimeError("sensitive diagnostics")) as lookup:
+                auth._refresh_once()
+                response = self.post()
+                self.assertEqual(503, response.status_code)
+                self.assertEqual("1", response.headers["Retry-After"])
+                self.assertNotIn("sensitive", response.get_data(as_text=True))
+                self.assertEqual(503, self.post().status_code)
+                lookup.assert_called_once()
+            auth._refresh_once()
+            self.assertEqual(202, self.post().status_code)
 
     def test_concurrent_creation_returns_one_acceptance_one_conflict(self):
         barrier = threading.Barrier(2)
@@ -282,6 +360,164 @@ class ProvisioningKubeClientTest(unittest.TestCase):
         with self.assertRaises(ProvisioningError): self.client.create_user({})
         request.side_effect = requests.Timeout("sensitive request")
         with self.assertRaises(ProvisioningError) as error: self.client.create_user({})
+        self.assertNotIn("sensitive", str(error.exception))
+
+
+class ProvisioningAuthorizerTest(unittest.TestCase):
+    def test_cold_start_and_expired_snapshot_fail_closed(self):
+        now = [0.0]
+        kube = FakeKube()
+        auth = ProvisioningAuthorizer(loader=kube.provisioning_secret, clock=lambda: now[0])
+        with patch.object(auth, "start"):
+            with self.assertRaises(ProvisioningError) as error:
+                auth.authorize(TOKEN.encode())
+            self.assertEqual(503, error.exception.status)
+            auth._refresh_once()
+            auth.authorize(TOKEN.encode())
+            now[0] = 2.0
+            with self.assertRaises(ProvisioningError) as error:
+                auth.authorize(TOKEN.encode())
+            self.assertEqual(503, error.exception.status)
+        self.assertEqual(1, kube.secret_reads)
+
+    def test_slow_response_cannot_extend_revoked_token_lifetime(self):
+        now = [0.0]
+        def slow_loader():
+            secret = FakeKube().secret
+            now[0] += 2.0
+            return secret
+        auth = ProvisioningAuthorizer(loader=slow_loader, clock=lambda: now[0])
+        with patch.object(auth, "start"):
+            auth._refresh_once()
+            with self.assertRaises(ProvisioningError) as error:
+                auth.authorize(TOKEN.encode())
+            self.assertEqual(503, error.exception.status)
+
+    def test_rotation_revocation_and_recovery_do_not_depend_on_client_traffic(self):
+        kube = FakeKube()
+        auth = ProvisioningAuthorizer(loader=kube.provisioning_secret)
+        with patch.object(auth, "start"):
+            auth._refresh_once()
+            auth.authorize(TOKEN.encode())
+            kube.secret["data"]["token"] = base64.b64encode(b"rotated-synthetic").decode()
+            auth._refresh_once()
+            with self.assertRaises(ProvisioningError) as error:
+                auth.authorize(TOKEN.encode())
+            self.assertEqual(401, error.exception.status)
+            auth.authorize(b"rotated-synthetic")
+            kube.secret = None
+            auth._refresh_once()
+            with self.assertRaises(ProvisioningError) as error:
+                auth.authorize(b"rotated-synthetic")
+            self.assertEqual(503, error.exception.status)
+            kube.secret = FakeKube().secret
+            auth._refresh_once()
+            auth.authorize(TOKEN.encode())
+        self.assertEqual(4, kube.secret_reads)
+
+    def test_only_one_background_worker_under_concurrent_invalid_and_valid_requests(self):
+        kube = FakeKube()
+        auth = ProvisioningAuthorizer(loader=kube.provisioning_secret)
+        self.addCleanup(auth.close)
+        entered, release = threading.Event(), threading.Event()
+        def blocked_loader():
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError("test synchronization timed out")
+            return kube.provisioning_secret()
+        auth._loader = blocked_loader
+        try:
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                list(pool.map(lambda _: auth.start(), range(32)))
+            self.assertTrue(entered.wait(1))
+            worker = auth._thread
+            with self.assertRaises(ProvisioningError) as error:
+                auth.authorize(TOKEN.encode())
+            self.assertEqual(503, error.exception.status)
+            self.assertIs(worker, auth._thread)
+            release.set()
+            deadline = time.monotonic() + 1
+            while True:
+                try:
+                    auth.authorize(TOKEN.encode())
+                    break
+                except ProvisioningError:
+                    if time.monotonic() > deadline:
+                        self.fail("background refresh never became ready")
+                    time.sleep(0.01)
+            def request(index):
+                try:
+                    auth.authorize(TOKEN.encode() if index % 2 else b"invalid-" + str(index).encode())
+                    return 200
+                except ProvisioningError as error:
+                    return error.status
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                results = list(pool.map(request, range(200)))
+            self.assertEqual([401, 200] * 100, results)
+            self.assertEqual(1, kube.secret_reads)
+        finally:
+            release.set()
+            auth.close()
+            if auth._thread is not None:
+                auth._thread.join(timeout=1)
+
+
+class NamespaceGuardTest(unittest.TestCase):
+    def setUp(self):
+        self.patch = patch("openserverless.impl.provisioning.namespace_guard.CouchDB")
+        self.db = self.patch.start().return_value
+        self.addCleanup(self.patch.stop)
+        self.db.db_base = "http://couchdb.test/openserverless_"
+        self.get = self.db.db_session.get
+        self.response = self.get.return_value
+        self.response.status_code = 200
+
+    def rows(self, *bodies):
+        self.response.json.side_effect = [{"rows": rows} for rows in bodies]
+
+    def test_fresh_name_checks_identity_entities_and_activation_history(self):
+        self.rows([{"key": "labtenant", "error": "not_found"}], [], [])
+        NamespaceGuard().assert_unused("labtenant")
+        self.assertEqual(3, self.get.call_count)
+        calls = self.get.call_args_list
+        self.assertEqual('["labtenant"]', calls[0].kwargs["params"]["keys"])
+        for call in calls[1:]:
+            self.assertEqual('"labtenant/"', call.kwargs["params"]["startkey"])
+            self.assertEqual('"labtenant0"', call.kwargs["params"]["endkey"])
+            self.assertEqual("false", call.kwargs["params"]["inclusive_end"])
+            self.assertEqual(1, call.kwargs["params"]["limit"])
+            self.assertEqual((2, 3), call.kwargs["timeout"])
+        self.db.db_session.close.assert_called_once()
+
+    def test_live_or_deleted_subject_and_orphaned_package_or_activation_conflict(self):
+        cases = [
+            ([{"key": "labtenant", "id": "labtenant", "value": {"rev": "1-live"}}],),
+            ([{"key": "labtenant", "id": "labtenant", "value": {"rev": "2-gone", "deleted": True}}],),
+            ([{"key": "labtenant", "error": "not_found"}], [{"id": "labtenant/pkg/action"}]),
+            ([{"key": "labtenant", "error": "not_found"}], [], [{"id": "labtenant/activation"}]),
+        ]
+        for bodies in cases:
+            with self.subTest(bodies=bodies):
+                self.rows(*bodies)
+                with self.assertRaises(ProvisioningError) as error:
+                    NamespaceGuard().assert_unused("labtenant")
+                self.assertEqual(409, error.exception.status)
+
+    def test_malformed_forbidden_missing_database_and_transport_fail_closed(self):
+        for data in ({}, [], {"rows": None}, {"rows": []}, {"rows": [{"key": "other", "error": "not_found"}]}):
+            self.response.json.side_effect = None
+            self.response.json.return_value = data
+            with self.assertRaises(ProvisioningError) as error:
+                NamespaceGuard().assert_unused("labtenant")
+            self.assertEqual(503, error.exception.status)
+        for code in (401, 403, 404, 500):
+            self.response.status_code = code
+            with self.assertRaises(ProvisioningError) as error:
+                NamespaceGuard().assert_unused("labtenant")
+            self.assertEqual(503, error.exception.status)
+        self.get.side_effect = requests.Timeout("sensitive diagnostics")
+        with self.assertRaises(ProvisioningError) as error:
+            NamespaceGuard().assert_unused("labtenant")
         self.assertNotIn("sensitive", str(error.exception))
 
 
