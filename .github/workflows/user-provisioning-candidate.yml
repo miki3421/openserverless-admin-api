@@ -1,0 +1,85 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+name: Publish User Provisioning Candidate
+
+on:
+  push:
+    branches: [feature/user-provisioning-447]
+    paths:
+      - '.github/workflows/user-provisioning-candidate.yml'
+      - '.dockerignore'
+      - 'Dockerfile'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'openserverless/**'
+      - 'tests/**'
+      - 'run.sh'
+      - 'LICENSE'
+      - 'NOTICE'
+      - 'DISCLAIMER'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: user-provisioning-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    if: github.repository == 'miki3421/openserverless-admin-api' && github.ref == 'refs/heads/feature/user-provisioning-447'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout candidate source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Select commit-specific candidate tag
+        run: echo "IMAGE=ghcr.io/miki3421/openserverless-admin-api:candidate-user-provisioning-447-${GITHUB_SHA}" >> "$GITHUB_ENV"
+      - name: Build candidate from source
+        run: |
+          docker build --platform linux/amd64 \
+            --label "org.opencontainers.image.source=https://github.com/miki3421/openserverless-admin-api" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.licenses=Apache-2.0" \
+            --label "org.opencontainers.image.description=User provisioning API candidate for issue 447" \
+            -t "$IMAGE" .
+      - name: Run the complete Admin API test suite in the candidate
+        run: |
+          docker run --rm --network none \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -v "$GITHUB_WORKSPACE/tests:/tests:ro" \
+            --entrypoint /home/openserverless/.venv/bin/python \
+            "$IMAGE" -m unittest discover -s /tests -v
+      - name: Authenticate with personal GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish only the candidate tag
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE"
+          digest=$(docker image inspect "$IMAGE" --format '{{range .RepoDigests}}{{println .}}{{end}}' | sed -n 's|^ghcr.io/miki3421/openserverless-admin-api@||p' | head -n 1)
+          test -n "$digest"
+          printf 'Commit: `%s`\n\nCandidate tag: `%s`\n\nPinned image: `ghcr.io/miki3421/openserverless-admin-api@%s`\n' "$GITHUB_SHA" "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
