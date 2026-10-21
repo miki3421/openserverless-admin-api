@@ -173,6 +173,11 @@ suite in the resulting image, and publishes **only**:
 ghcr.io/miki3421/openserverless-admin-api:candidate-user-provisioning-447-<full-commit-sha>
 ```
 
+Dependencies are installed from `uv.lock` with `uv sync --frozen --no-dev` during
+the build. The container starts the installed Python interpreter directly;
+startup does not resolve or download dependencies. CI also verifies startup with
+networking disabled and an unauthenticated request returning `401`.
+
 The workflow is restricted to that exact branch in
 `miki3421/openserverless-admin-api`. It does not update `latest`, `advanced`,
 release tags, Apache images, or cluster image pins. Its Actions summary gives the

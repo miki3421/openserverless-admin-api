@@ -70,6 +70,23 @@ jobs:
             -v "$GITHUB_WORKSPACE/tests:/tests:ro" \
             --entrypoint /home/openserverless/.venv/bin/python \
             "$IMAGE" -m unittest discover -s /tests -v
+      - name: Verify startup without network or runtime dependency installation
+        run: |
+          set -euo pipefail
+          container=$(docker run -d --network none "$IMAGE")
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          ready=0
+          for attempt in $(seq 1 20); do
+            if docker exec "$container" /home/openserverless/.venv/bin/python -c 'import http.client; connection = http.client.HTTPConnection("127.0.0.1", 5000, timeout=2); connection.request("POST", "/system/api/v1/users", body="{}", headers={"Content-Type": "application/json"}); response = connection.getresponse(); raise SystemExit(0 if response.status == 401 else 1)' >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            docker logs "$container"
+            exit 1
+          fi
       - name: Authenticate with personal GitHub Container Registry
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:

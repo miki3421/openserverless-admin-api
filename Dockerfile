@@ -41,7 +41,7 @@ RUN pip install --no-cache-dir uv
 
 # Install dependencies
 USER openserverless
-RUN uv venv && uv pip install --requirement pyproject.toml
+RUN uv sync --frozen --no-dev
 
 # Apache release metadata (see DISCLAIMER, LICENSE, NOTICE)
 COPY DISCLAIMER LICENSE NOTICE  /
@@ -49,4 +49,4 @@ COPY DISCLAIMER LICENSE NOTICE  /
 ENV HOME=/home/openserverless
 EXPOSE 5000
 
-CMD ["uv", "run", "-m", "openserverless"]
+CMD ["/home/openserverless/.venv/bin/python", "-m", "openserverless"]
